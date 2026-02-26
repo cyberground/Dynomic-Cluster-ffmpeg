@@ -1,6 +1,7 @@
 import os, subprocess, time
 import redis.asyncio as aioredis
 from arq.connections import RedisSettings
+from arq.cron import cron
 
 REDIS_HOST  = os.getenv("REDIS_HOST", "redis")
 OUTPUT_DIR  = "/shared/outputs"
@@ -93,8 +94,7 @@ async def cleanup_old_files(ctx):
 class WorkerSettings:
     functions       = [convert_to_mp3]
     cron_jobs       = [
-        # Cleanup alle 15 Minuten
-        {"coroutine": cleanup_old_files, "minute": {0, 15, 30, 45}}
+        cron(cleanup_old_files, minute={0, 15, 30, 45})
     ]
     redis_settings  = RedisSettings(host=REDIS_HOST)
     max_jobs        = int(os.getenv("MAX_JOBS", "2"))
