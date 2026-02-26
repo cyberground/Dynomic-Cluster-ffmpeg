@@ -83,12 +83,10 @@ services:
 
   # ── Nginx Load Balancer ───────────────────────
   nginx:
-    image: nginx:alpine
+    build: ./nginx
     restart: unless-stopped
     ports:
       - "9001:80"
-    volumes:
-      - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro
     depends_on:
       - api_1
       - api_2
