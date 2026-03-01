@@ -5,6 +5,7 @@ import shutil
 from fastapi import FastAPI, UploadFile, File, HTTPException, Security, Request, BackgroundTasks
 from fastapi.security import APIKeyHeader
 from fastapi.responses import FileResponse
+from pydantic import BaseModel
 import redis.asyncio as aioredis
 from arq import create_pool
 from arq.connections import RedisSettings
@@ -17,13 +18,13 @@ OUTPUT_DIR = "/shared/outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-app = FastAPI(title="ffmpeg-api", version="2.1")
+app = FastAPI(title="ffmpeg-api", version="2.2")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
 
 # ---------------------------------------------------------------------------
-# App Lifecycle – Connections einmalig aufbauen, nicht pro Request
+# App Lifecycle
 # ---------------------------------------------------------------------------
 
 @app.on_event("startup")
@@ -51,11 +52,18 @@ def require_api_key(key: str = Security(api_key_header)):
 
 
 # ---------------------------------------------------------------------------
+# Models
+# ---------------------------------------------------------------------------
+
+class PathRequest(BaseModel):
+    file_path: str
+
+
+# ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
 
 def _remove_file(path: str):
-    """Datei sicher löschen – für BackgroundTasks."""
     try:
         os.remove(path)
     except FileNotFoundError:
@@ -68,7 +76,6 @@ def _remove_file(path: str):
 
 @app.get("/health")
 def health():
-    """Health-Endpoint – offen für Coolify-Healthcheck."""
     return {"status": "ok"}
 
 
@@ -79,7 +86,7 @@ async def mp4_to_mp3(
     _key: str = Security(require_api_key)
 ):
     """
-    Nimmt eine Datei an, legt sie in die Queue und gibt eine Job-ID zurück.
+    Klassischer Upload via multipart-form-data.
     Liest die Datei in 1MB-Chunks um den Event Loop nicht zu blockieren.
     """
     if not file or not file.filename:
@@ -89,12 +96,34 @@ async def mp4_to_mp3(
     in_suffix = os.path.splitext(file.filename)[1] or ".mp4"
     in_path   = os.path.join(UPLOAD_DIR, f"{job_id}{in_suffix}")
 
-    # Async chunk-weises Schreiben
     with open(in_path, "wb") as f:
-        while chunk := await file.read(1024 * 1024):  # 1 MB Chunks
+        while chunk := await file.read(1024 * 1024):
             f.write(chunk)
 
     await request.app.state.arq_pool.enqueue_job("convert_to_mp3", job_id, in_path)
+
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/path-to-mp3")
+async def path_to_mp3(
+    request: Request,
+    body: PathRequest,
+    _key: str = Security(require_api_key)
+):
+    """
+    Neuer Endpoint: Datei liegt bereits auf dem shared Volume.
+    n8n übergibt nur den Dateipfad – kein Upload, kein RAM-Problem.
+    """
+    if not os.path.exists(body.file_path):
+        raise HTTPException(status_code=404, detail=f"File not found: {body.file_path}")
+
+    # Sicherheitscheck: Datei muss im erlaubten Verzeichnis liegen
+    if not body.file_path.startswith("/shared/"):
+        raise HTTPException(status_code=400, detail="file_path must be within /shared/")
+
+    job_id = str(uuid.uuid4())
+    await request.app.state.arq_pool.enqueue_job("convert_to_mp3", job_id, body.file_path)
 
     return {"job_id": job_id, "status": "queued"}
 
@@ -105,12 +134,7 @@ async def get_status(
     request: Request,
     _key: str = Security(require_api_key)
 ):
-    """
-    Gibt den Status eines Jobs zurück.
-    Enthält auch Fortschritt (progress) und ggf. Fehlermeldung.
-    """
-    redis = request.app.state.redis
-
+    redis    = request.app.state.redis
     status   = await redis.get(f"job:{job_id}:status")
     error    = await redis.get(f"job:{job_id}:error")
     progress = await redis.get(f"job:{job_id}:progress")
@@ -137,10 +161,6 @@ async def download(
     background_tasks: BackgroundTasks,
     _key: str = Security(require_api_key)
 ):
-    """
-    Gibt die fertige MP3-Datei zurück.
-    Löscht die Datei nach dem Download automatisch im Hintergrund.
-    """
     redis    = request.app.state.redis
     out_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp3")
 
@@ -153,7 +173,6 @@ async def download(
             detail=f"Job status: {status.decode()}"
         )
 
-    # Datei nach Download im Hintergrund löschen
     background_tasks.add_task(_remove_file, out_path)
 
     return FileResponse(
