@@ -34,7 +34,7 @@ services:
       - REDIS_HOST=redis
       - API_KEY=${API_KEY}
     volumes:
-      - shared_files:/shared
+      - /opt/shared:/shared      
     deploy:
       resources:
         limits:
@@ -51,7 +51,7 @@ services:
       - REDIS_HOST=redis
       - API_KEY=${API_KEY}
     volumes:
-      - shared_files:/shared
+      - /opt/shared:/shared      
     deploy:
       resources:
         limits:
@@ -71,7 +71,7 @@ services:
       - JOB_TIMEOUT=1800     # 30 Minuten Timeout
       - FILE_TTL_SECONDS=3600
     volumes:
-      - shared_files:/shared
+      - /opt/shared:/shared
     deploy:
       resources:
         limits:
@@ -90,7 +90,7 @@ services:
       - JOB_TIMEOUT=1800
       - FILE_TTL_SECONDS=3600
     volumes:
-      - shared_files:/shared
+      - /opt/shared:/shared
     deploy:
       resources:
         limits:
