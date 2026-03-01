@@ -1,10 +1,9 @@
 version: "3.9"
-
 # ─────────────────────────────────────────────
 #  FFmpeg Cluster
 #  - nginx      → Load Balancer      :9001
-#  - api_1/2/3  → FastAPI Instanzen  (intern)
-#  - worker_1/2 → FFmpeg Worker      (intern)
+#  - api_1/2    → FastAPI Instanzen  (intern :8000)
+#  - worker_1/2 → FFmpeg Worker      (intern, MAX_JOBS=1)
 #  - redis      → Job Queue          (intern)
 # ─────────────────────────────────────────────
 
@@ -16,6 +15,11 @@ services:
     restart: unless-stopped
     volumes:
       - redis_data:/data
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -28,8 +32,14 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_HOST=redis
+      - API_KEY=${API_KEY}
     volumes:
       - shared_files:/shared
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
     depends_on:
       redis:
         condition: service_healthy
@@ -39,19 +49,14 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_HOST=redis
+      - API_KEY=${API_KEY}
     volumes:
       - shared_files:/shared
-    depends_on:
-      redis:
-        condition: service_healthy
-
-  api_3:
-    build: ./api
-    restart: unless-stopped
-    environment:
-      - REDIS_HOST=redis
-    volumes:
-      - shared_files:/shared
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 512m
     depends_on:
       redis:
         condition: service_healthy
@@ -62,9 +67,16 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_HOST=redis
-      - MAX_JOBS=2          # 2 gleichzeitige Konvertierungen pro Worker
+      - MAX_JOBS=1           # 1 Job pro Worker → max 2 gleichzeitige Konvertierungen
+      - JOB_TIMEOUT=1800     # 30 Minuten Timeout
+      - FILE_TTL_SECONDS=3600
     volumes:
       - shared_files:/shared
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
     depends_on:
       redis:
         condition: service_healthy
@@ -74,9 +86,16 @@ services:
     restart: unless-stopped
     environment:
       - REDIS_HOST=redis
-      - MAX_JOBS=2
+      - MAX_JOBS=1
+      - JOB_TIMEOUT=1800
+      - FILE_TTL_SECONDS=3600
     volumes:
       - shared_files:/shared
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 2g
     depends_on:
       redis:
         condition: service_healthy
@@ -87,10 +106,14 @@ services:
     restart: unless-stopped
     ports:
       - "9001:80"
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 256m
     depends_on:
       - api_1
       - api_2
-      - api_3
 
 volumes:
   redis_data:
