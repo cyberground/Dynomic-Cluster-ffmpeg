@@ -10,7 +10,7 @@ nginx :9001  (Load Balancer, Round-Robin)
   │
   ├── api_1 (FastAPI)
   ├── api_2 (FastAPI)   ──► Redis Queue ──► worker_1 (FFmpeg, 2 Jobs parallel)
-  └── api_3 (FastAPI)                  └──► worker_2 (FFmpeg, 2 Jobs parallel)
+                        └──► worker_2 (FFmpeg, 2 Jobs parallel)
 ```
 
 **Kapazität:** 3 API-Instanzen × 2 Worker × 2 parallele Jobs = **4 gleichzeitige Konvertierungen**
@@ -52,4 +52,4 @@ docker compose logs -f nginx      # Load Balancer
 | Variable   | Default | Beschreibung                          |
 |------------|---------|---------------------------------------|
 | REDIS_HOST | redis   | Redis-Hostname                        |
-| MAX_JOBS   | 2       | Gleichzeitige FFmpeg-Jobs pro Worker  |
+| MAX_JOBS   | 1       | Gleichzeitige FFmpeg-Jobs pro Worker  |
