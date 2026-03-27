@@ -186,7 +186,7 @@ async def youtube_to_mp3(
         result = subprocess.run(
             [
                 "yt-dlp",
-                "--js-runtimes", "nodejs",
+                "--js-runtimes", "node",
                 "--no-playlist",
                 "--extract-audio",
                 "--audio-format", "mp3",
