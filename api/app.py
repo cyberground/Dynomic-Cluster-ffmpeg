@@ -79,7 +79,31 @@ def _remove_file(path: str):
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    import subprocess
+    checks = {"status": "ok"}
+
+    # yt-dlp check
+    try:
+        r = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True, timeout=5)
+        checks["yt_dlp"] = r.stdout.strip() if r.returncode == 0 else "ERROR: " + r.stderr[:100]
+    except Exception as e:
+        checks["yt_dlp"] = f"NOT INSTALLED: {e}"
+
+    # Node.js check (JS Runtime fuer yt-dlp)
+    try:
+        r = subprocess.run(["node", "--version"], capture_output=True, text=True, timeout=5)
+        checks["nodejs"] = r.stdout.strip() if r.returncode == 0 else "ERROR"
+    except Exception as e:
+        checks["nodejs"] = f"NOT INSTALLED: {e}"
+
+    # ffmpeg check
+    try:
+        r = subprocess.run(["ffmpeg", "-version"], capture_output=True, text=True, timeout=5)
+        checks["ffmpeg"] = r.stdout.split('\n')[0] if r.returncode == 0 else "ERROR"
+    except Exception as e:
+        checks["ffmpeg"] = f"NOT INSTALLED: {e}"
+
+    return checks
 
 
 @app.post("/mp4-to-mp3")
