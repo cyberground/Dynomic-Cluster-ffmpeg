@@ -58,6 +58,9 @@ def require_api_key(key: str = Security(api_key_header)):
 class PathRequest(BaseModel):
     file_path: str
 
+class YouTubeRequest(BaseModel):
+    url: str
+
 
 # ---------------------------------------------------------------------------
 # Helper
@@ -126,6 +129,93 @@ async def path_to_mp3(
     await request.app.state.arq_pool.enqueue_job("convert_to_mp3", job_id, body.file_path)
 
     return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/youtube-to-mp3")
+async def youtube_to_mp3(
+    request: Request,
+    body: YouTubeRequest,
+    _key: str = Security(require_api_key)
+):
+    """
+    YouTube-URL entgegennehmen, Audio via yt-dlp extrahieren,
+    dann an den Worker zur MP3-Konvertierung weiterleiten.
+    """
+    import subprocess
+    import re
+
+    url = body.url.strip()
+
+    # Validierung: nur YouTube-URLs
+    if not re.match(r'https?://(www\.)?(youtube\.com|youtu\.be)/', url):
+        raise HTTPException(status_code=400, detail="Nur YouTube-URLs erlaubt")
+
+    job_id = str(uuid.uuid4())
+    dl_path = os.path.join(UPLOAD_DIR, f"{job_id}.%(ext)s")
+
+    # Status setzen
+    redis = request.app.state.redis
+    await redis.set(f"job:{job_id}:status", "downloading")
+
+    try:
+        # yt-dlp: Nur Audio extrahieren, bestes Format
+        result = subprocess.run(
+            [
+                "yt-dlp",
+                "--no-playlist",
+                "--extract-audio",
+                "--audio-format", "mp3",
+                "--audio-quality", "5",
+                "-o", os.path.join(UPLOAD_DIR, f"{job_id}.%(ext)s"),
+                url,
+            ],
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+
+        if result.returncode != 0:
+            await redis.set(f"job:{job_id}:status", "failed")
+            await redis.set(f"job:{job_id}:error", result.stderr[:500])
+            return {"job_id": job_id, "status": "failed", "error": result.stderr[:200]}
+
+        # yt-dlp schreibt die Datei mit --extract-audio --audio-format mp3
+        # Dateiname finden
+        mp3_path = os.path.join(UPLOAD_DIR, f"{job_id}.mp3")
+        if not os.path.exists(mp3_path):
+            # Suche nach der tatsaechlichen Datei
+            for f in os.listdir(UPLOAD_DIR):
+                if f.startswith(job_id):
+                    actual_path = os.path.join(UPLOAD_DIR, f)
+                    # Falls nicht MP3, durch Worker konvertieren lassen
+                    if not f.endswith(".mp3"):
+                        await request.app.state.arq_pool.enqueue_job("convert_to_mp3", job_id, actual_path)
+                        return {"job_id": job_id, "status": "queued"}
+                    mp3_path = actual_path
+                    break
+
+        if os.path.exists(mp3_path):
+            # MP3 direkt in outputs verschieben
+            out_path = os.path.join(OUTPUT_DIR, f"{job_id}.mp3")
+            shutil.move(mp3_path, out_path)
+            await redis.set(f"job:{job_id}:status", "done")
+            await redis.set(f"job:{job_id}:progress", "100")
+            import time
+            await redis.set(f"job:{job_id}:expires_at", str(time.time() + 3600))
+            return {"job_id": job_id, "status": "done"}
+
+        await redis.set(f"job:{job_id}:status", "failed")
+        await redis.set(f"job:{job_id}:error", "Download completed but output file not found")
+        return {"job_id": job_id, "status": "failed"}
+
+    except subprocess.TimeoutExpired:
+        await redis.set(f"job:{job_id}:status", "failed")
+        await redis.set(f"job:{job_id}:error", "YouTube download timeout (5min)")
+        return {"job_id": job_id, "status": "failed"}
+    except Exception as e:
+        await redis.set(f"job:{job_id}:status", "failed")
+        await redis.set(f"job:{job_id}:error", str(e)[:500])
+        return {"job_id": job_id, "status": "failed"}
 
 
 @app.get("/status/{job_id}")
