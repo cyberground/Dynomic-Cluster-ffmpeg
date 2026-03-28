@@ -18,7 +18,7 @@ OUTPUT_DIR = "/shared/outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-app = FastAPI(title="ffmpeg-api", version="3.1")
+app = FastAPI(title="ffmpeg-api", version="3.2")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -302,7 +302,6 @@ async def youtube_to_mp3(
                 cf.write(body.cookies)
 
         # yt-dlp Kommando bauen
-        # Note: bgutil-ytdlp-pot-provider (pip) generates PO tokens automatically
         cmd = [
             "yt-dlp",
             "--no-playlist",

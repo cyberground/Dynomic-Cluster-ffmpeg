@@ -5,4 +5,3 @@ arq
 redis
 yt-dlp
 youtube-transcript-api
-bgutil-ytdlp-pot-provider
