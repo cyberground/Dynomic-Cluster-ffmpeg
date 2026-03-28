@@ -18,7 +18,7 @@ OUTPUT_DIR = "/shared/outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-app = FastAPI(title="ffmpeg-api", version="2.3")
+app = FastAPI(title="ffmpeg-api", version="3.0")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -61,6 +61,10 @@ class PathRequest(BaseModel):
 class YouTubeRequest(BaseModel):
     url: str
     cookies: str | None = None  # Netscape cookie format for bot-protection bypass
+
+class TranscriptRequest(BaseModel):
+    url: str
+    language: str = "de"  # preferred language (de, en, auto)
 
 
 # ---------------------------------------------------------------------------
@@ -154,6 +158,113 @@ async def path_to_mp3(
     await request.app.state.arq_pool.enqueue_job("convert_to_mp3", job_id, body.file_path)
 
     return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/youtube-transcript")
+async def youtube_transcript(
+    body: TranscriptRequest,
+    _key: str = Security(require_api_key)
+):
+    """
+    Holt YouTube-Untertitel direkt via youtube-transcript-api.
+    Kein Download, kein Whisper — sofort verfuegbar.
+    Fallback-Kette: gewuenschte Sprache → andere Sprache → auto-generated.
+    """
+    import re
+    from youtube_transcript_api import YouTubeTranscriptApi
+    from youtube_transcript_api._errors import (
+        TranscriptsDisabled,
+        NoTranscriptFound,
+        VideoUnavailable,
+    )
+
+    url = body.url.strip()
+
+    # Video-ID extrahieren
+    match = re.search(r'(?:v=|youtu\.be/|/embed/|/v/)([a-zA-Z0-9_-]{11})', url)
+    if not match:
+        raise HTTPException(status_code=400, detail="Keine gueltige YouTube-URL / Video-ID")
+
+    video_id = match.group(1)
+
+    try:
+        # Verfuegbare Transkripte auflisten
+        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+
+        transcript = None
+        used_language = None
+        is_generated = False
+
+        # Strategie 1: Manuelle Untertitel in gewuenschter Sprache
+        preferred = [body.language] if body.language != "auto" else ["de", "en"]
+        try:
+            transcript = transcript_list.find_manually_created_transcript(preferred)
+            used_language = transcript.language_code
+            is_generated = False
+        except NoTranscriptFound:
+            pass
+
+        # Strategie 2: Auto-generierte Untertitel in gewuenschter Sprache
+        if not transcript:
+            try:
+                transcript = transcript_list.find_generated_transcript(preferred)
+                used_language = transcript.language_code
+                is_generated = True
+            except NoTranscriptFound:
+                pass
+
+        # Strategie 3: Irgendein verfuegbares Transkript
+        if not transcript:
+            for t in transcript_list:
+                transcript = t
+                used_language = t.language_code
+                is_generated = t.is_generated
+                break
+
+        if not transcript:
+            return {
+                "success": False,
+                "has_transcript": False,
+                "video_id": video_id,
+                "message": "Keine Untertitel verfuegbar fuer dieses Video",
+            }
+
+        # Transkript-Daten holen
+        entries = transcript.fetch()
+        # Zu Fliesstext zusammenfuegen
+        full_text = " ".join(e.get("text", e.text if hasattr(e, "text") else str(e)) if isinstance(e, dict) else e.text for e in entries)
+
+        return {
+            "success": True,
+            "has_transcript": True,
+            "video_id": video_id,
+            "language": used_language,
+            "is_generated": is_generated,
+            "text": full_text,
+            "segments": len(entries),
+        }
+
+    except TranscriptsDisabled:
+        return {
+            "success": False,
+            "has_transcript": False,
+            "video_id": video_id,
+            "message": "Untertitel sind fuer dieses Video deaktiviert",
+        }
+    except VideoUnavailable:
+        return {
+            "success": False,
+            "has_transcript": False,
+            "video_id": video_id,
+            "message": "Video nicht verfuegbar (privat, geloescht oder regional gesperrt)",
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "has_transcript": False,
+            "video_id": video_id,
+            "message": f"Fehler: {str(e)[:300]}",
+        }
 
 
 @app.post("/youtube-to-mp3")
