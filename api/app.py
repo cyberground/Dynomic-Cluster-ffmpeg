@@ -18,7 +18,7 @@ OUTPUT_DIR = "/shared/outputs"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-app = FastAPI(title="ffmpeg-api", version="2.2")
+app = FastAPI(title="ffmpeg-api", version="2.3")
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -60,6 +60,7 @@ class PathRequest(BaseModel):
 
 class YouTubeRequest(BaseModel):
     url: str
+    cookies: str | None = None  # Netscape cookie format for bot-protection bypass
 
 
 # ---------------------------------------------------------------------------
@@ -176,26 +177,38 @@ async def youtube_to_mp3(
 
     job_id = str(uuid.uuid4())
     dl_path = os.path.join(UPLOAD_DIR, f"{job_id}.%(ext)s")
+    cookie_path = None
 
     # Status setzen
     redis = request.app.state.redis
     await redis.set(f"job:{job_id}:status", "downloading")
 
     try:
+        # Cookie-Datei schreiben wenn vorhanden
+        if body.cookies and body.cookies.strip():
+            cookie_path = os.path.join(UPLOAD_DIR, f"{job_id}_cookies.txt")
+            with open(cookie_path, "w") as cf:
+                cf.write(body.cookies)
+
+        # yt-dlp Kommando bauen
+        cmd = [
+            "yt-dlp",
+            "--js-runtimes", "node",
+            "--no-playlist",
+            "--extractor-args", "youtube:player_client=mediaconnect",
+            "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+            "--extract-audio",
+            "--audio-format", "mp3",
+            "--audio-quality", "5",
+            "-o", os.path.join(UPLOAD_DIR, f"{job_id}.%(ext)s"),
+        ]
+        if cookie_path:
+            cmd.extend(["--cookies", cookie_path])
+        cmd.append(url)
+
         # yt-dlp: Nur Audio extrahieren, bestes Format
         result = subprocess.run(
-            [
-                "yt-dlp",
-                "--js-runtimes", "node",
-                "--no-playlist",
-                "--extractor-args", "youtube:player_client=mediaconnect",
-                "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-                "--extract-audio",
-                "--audio-format", "mp3",
-                "--audio-quality", "5",
-                "-o", os.path.join(UPLOAD_DIR, f"{job_id}.%(ext)s"),
-                url,
-            ],
+            cmd,
             capture_output=True,
             text=True,
             timeout=300,
@@ -243,6 +256,10 @@ async def youtube_to_mp3(
         await redis.set(f"job:{job_id}:status", "failed")
         await redis.set(f"job:{job_id}:error", str(e)[:500])
         return {"job_id": job_id, "status": "failed"}
+    finally:
+        # Cookie-Datei aufräumen
+        if cookie_path:
+            _remove_file(cookie_path)
 
 
 @app.get("/status/{job_id}")
