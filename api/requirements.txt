@@ -3,7 +3,11 @@ uvicorn[standard]
 python-multipart
 arq
 redis
-yt-dlp
+# Untergrenze bewusst gesetzt: ungebunden friert der Docker-Layer-Cache die Version ein.
+# Im Betrieb lief am 2026-08-16 noch 2026.03.17 — vier Monate alt, und yt-dlp warnt ab 90
+# Tagen selbst davor, weil YouTube-Aenderungen alte Fassungen regelmaessig unbrauchbar
+# machen. Mit einer Untergrenze schlaegt der Build fehl statt still Veraltetes zu behalten.
+yt-dlp>=2026.7.4
 # Ab 1.0 ist der Einstiegspunkt instanzbasiert (list()/fetch() statt der statischen
 # list_transcripts()). Die Abhaengigkeit stand hier ungebunden — ein Rebuild zog 1.x
 # und legte /youtube-transcript still lahm. Gebunden auf die geprueft funktionierende
