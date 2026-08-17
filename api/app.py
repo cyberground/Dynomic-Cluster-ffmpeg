@@ -61,10 +61,20 @@ class PathRequest(BaseModel):
 class YouTubeRequest(BaseModel):
     url: str
     cookies: str | None = None  # Netscape cookie format for bot-protection bypass
+    # Welchen YouTube-Client yt-dlp vorgibt. Default bleibt "web" (Stand v3.1), aber
+    # konfigurierbar: welcher Client durch die Bot-Pruefung kommt, aendert YouTube
+    # laufend. Ohne diesen Schalter kostet jeder Versuch einen Redeploy.
+    # "" (leer) laesst yt-dlp seine eigenen Defaults waehlen.
+    player_client: str | None = None
 
 class TranscriptRequest(BaseModel):
     url: str
     language: str = "de"  # preferred language (de, en, auto)
+    # Netscape-Cookie-Format, wie bei /youtube-to-mp3. YouTube beantwortet Anfragen aus
+    # Rechenzentrums-Netzen sonst mit einer Bot-Pruefung ("Sign in to confirm you're not
+    # a bot") — das trifft den Untertitel-Abruf genauso wie den Download, obwohl dieser
+    # Endpunkt bisher gar keine Cookies annehmen konnte.
+    cookies: str | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -109,6 +119,37 @@ def health():
         checks["ffmpeg"] = f"NOT INSTALLED: {e}"
 
     return checks
+
+
+def _session_with_cookies(cookies: str | None):
+    """requests.Session mit Netscape-Cookies, oder None wenn keine uebergeben wurden.
+
+    Gibt bewusst None zurueck statt einer leeren Session: youtube-transcript-api legt
+    sich dann selbst eine an. Schlaegt das Einlesen fehl, wird das GEMELDET und nicht
+    still ignoriert — sonst sucht man den Bot-Check spaeter an der falschen Stelle.
+    """
+    if not cookies or not cookies.strip():
+        return None
+    import http.cookiejar, tempfile, os as _os
+    import requests
+    path = None
+    try:
+        fd, path = tempfile.mkstemp(suffix="_cookies.txt")
+        with _os.fdopen(fd, "w") as fh:
+            fh.write(cookies)
+        jar = http.cookiejar.MozillaCookieJar()
+        jar.load(path, ignore_discard=True, ignore_expires=True)
+        sess = requests.Session()
+        sess.cookies = jar
+        return sess
+    except Exception as e:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Cookies nicht lesbar (Netscape-Format erwartet): {type(e).__name__}: {e}",
+        )
+    finally:
+        if path:
+            _remove_file(path)
 
 
 def _yt_error_detail(stderr: str, limit: int = 1500) -> str:
@@ -222,7 +263,12 @@ async def youtube_transcript(
         if hasattr(YouTubeTranscriptApi, "list_transcripts"):
             transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)   # < 1.0
         else:
-            transcript_list = YouTubeTranscriptApi().list(video_id)             # >= 1.0
+            # 1.x nimmt eine requests.Session entgegen (http_client). Damit lassen sich
+            # dieselben Cookies verwenden wie beim Download — ohne sie antwortet YouTube
+            # aus Rechenzentrums-Netzen mit einer Bot-Pruefung.
+            transcript_list = YouTubeTranscriptApi(
+                http_client=_session_with_cookies(body.cookies)
+            ).list(video_id)                                                    # >= 1.0
 
         transcript = None
         used_language = None
@@ -354,10 +400,14 @@ async def youtube_to_mp3(
                 cf.write(body.cookies)
 
         # yt-dlp Kommando bauen
+        client = body.player_client if body.player_client is not None else "web"
         cmd = [
             "yt-dlp",
             "--no-playlist",
-            "--extractor-args", "youtube:player_client=web",
+        ]
+        if client:
+            cmd.extend(["--extractor-args", f"youtube:player_client={client}"])
+        cmd += [
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "--extract-audio",
             "--audio-format", "mp3",
