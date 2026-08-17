@@ -176,6 +176,71 @@ def _yt_error_detail(stderr: str, limit: int = 1500) -> str:
     return "\n".join(chosen)[:limit]
 
 
+def _ytdlp_transcript(url: str, language: str, cookies: str | None) -> dict | None:
+    """Untertitel ueber yt-dlp holen, statt ueber youtube-transcript-api.
+
+    WARUM ES DIESEN ZWEITEN WEG GIBT (2026-08-17):
+    youtube-transcript-api spricht eine YouTube-Schnittstelle an, die Anfragen aus
+    Rechenzentrums-Netzen hart blockt — auch MIT gueltigen Cookies. Gemessen: derselbe
+    Cluster, dieselben frischen Cookies, /youtube-to-mp3 kommt durch, der Untertitel-Abruf
+    nicht. yt-dlp nutzt einen anderen Pfad und ist bereits authentifiziert.
+
+    Kein Download der Mediendatei (--skip-download): geholt werden nur die Untertitel.
+    Gibt None zurueck, wenn keine gefunden wurden — der Aufrufer entscheidet dann weiter.
+    """
+    import glob, json as _json, subprocess, tempfile, shutil as _shutil
+
+    workdir = tempfile.mkdtemp(prefix="subs_")
+    cookie_path = None
+    try:
+        langs = "de,en" if language in ("auto", "", None) else f"{language},de,en"
+        cmd = [
+            "yt-dlp", "--skip-download", "--no-playlist",
+            "--write-subs", "--write-auto-subs",
+            "--sub-langs", langs,
+            "--sub-format", "json3",
+            "-o", os.path.join(workdir, "%(id)s.%(ext)s"),
+        ]
+        if cookies and cookies.strip():
+            cookie_path = os.path.join(workdir, "cookies.txt")
+            with open(cookie_path, "w") as cf:
+                cf.write(cookies)
+            cmd.extend(["--cookies", cookie_path])
+        cmd.append(url)
+
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+
+        files = sorted(glob.glob(os.path.join(workdir, "*.json3")))
+        if not files:
+            return {
+                "found": False,
+                "detail": _yt_error_detail(proc.stderr) if proc.returncode != 0 else
+                          "yt-dlp hat keine Untertitel-Datei geschrieben",
+            }
+
+        # Bevorzugte Sprache zuerst, sonst die erste gefundene Datei.
+        pick = next((f for f in files if f".{language}." in f), files[0])
+        data = _json.load(open(pick, encoding="utf-8"))
+        parts = []
+        for ev in data.get("events", []):
+            for seg in ev.get("segs") or []:
+                t = seg.get("utf8", "")
+                if t and t != "\n":
+                    parts.append(t)
+        text = " ".join(" ".join(parts).split())
+        if not text:
+            return {"found": False, "detail": "Untertitel-Datei war leer"}
+
+        lang = os.path.basename(pick).split(".")[-2]
+        return {"found": True, "text": text, "language": lang, "segments": len(data.get("events", []))}
+    except subprocess.TimeoutExpired:
+        return {"found": False, "detail": "yt-dlp Zeitueberschreitung beim Untertitel-Abruf (120s)"}
+    except Exception as e:
+        return {"found": False, "detail": f"{type(e).__name__}: {e}"}
+    finally:
+        _shutil.rmtree(workdir, ignore_errors=True)
+
+
 @app.post("/mp4-to-mp3")
 async def mp4_to_mp3(
     request: Request,
@@ -355,14 +420,29 @@ async def youtube_transcript(
         # zweite nur eines und ist normal. Am 2026-08-16 aus einem Rechenzentrums-Netz
         # reproduziert.
         if type(e).__name__ in ("RequestBlocked", "IpBlocked"):
+            # Zweiter Weg: yt-dlp. Es spricht eine andere YouTube-Schnittstelle an und kommt
+            # mit denselben Cookies durch, wo die Bibliothek blockiert wird — nachgemessen
+            # am 2026-08-17 auf genau diesem Cluster.
+            alt = _ytdlp_transcript(url, body.language, body.cookies)
+            if alt and alt.get("found"):
+                return {
+                    "success": True,
+                    "has_transcript": True,
+                    "video_id": video_id,
+                    "language": alt.get("language"),
+                    "is_generated": True,   # ueber yt-dlp nicht sicher unterscheidbar
+                    "text": alt["text"],
+                    "segments": alt.get("segments", 0),
+                    "via": "yt-dlp",
+                }
             return {
                 "success": False,
                 "has_transcript": False,
                 "blocked": True,
                 "video_id": video_id,
-                "message": "YouTube blockiert Anfragen von der IP dieses Clusters "
-                           "(kein Untertitel-Problem). Abhilfe: Cookies hinterlegen oder "
-                           "ueber einen Proxy/anderes Netz gehen.",
+                "message": "YouTube blockiert Anfragen von der IP dieses Clusters, und auch "
+                           "der yt-dlp-Weg lieferte keine Untertitel. "
+                           + str((alt or {}).get("detail", ""))[:250],
             }
         return {
             "success": False,
