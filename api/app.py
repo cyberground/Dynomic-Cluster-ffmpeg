@@ -66,6 +66,13 @@ class YouTubeRequest(BaseModel):
     # laufend. Ohne diesen Schalter kostet jeder Versuch einen Redeploy.
     # "" (leer) laesst yt-dlp seine eigenen Defaults waehlen.
     player_client: str | None = None
+    # Format-Auswahl fuer yt-dlp (-f). Default "bestaudio/best": dieser Endpunkt will
+    # ausschliesslich Audio, die yt-dlp-Voreinstellung verlangt dagegen Video UND Audio
+    # und scheitert mit "Requested format is not available", sobald YouTube fuer den
+    # gewaehlten Client keine passende Kombination anbietet. Am 2026-08-17 mit frischen
+    # Cookies reproduziert: die Bot-Pruefung war ueberwunden, die Formatwahl scheiterte
+    # bei JEDEM Client identisch. Konfigurierbar, damit Nachjustieren keinen Redeploy kostet.
+    format_selector: str | None = None
 
 class TranscriptRequest(BaseModel):
     url: str
@@ -407,6 +414,9 @@ async def youtube_to_mp3(
         ]
         if client:
             cmd.extend(["--extractor-args", f"youtube:player_client={client}"])
+        fmt = body.format_selector if body.format_selector is not None else "bestaudio/best"
+        if fmt:
+            cmd.extend(["-f", fmt])
         cmd += [
             "--user-agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
             "--extract-audio",
