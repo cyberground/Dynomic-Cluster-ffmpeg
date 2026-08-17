@@ -111,6 +111,23 @@ def health():
     return checks
 
 
+def _yt_error_detail(stderr: str, limit: int = 1500) -> str:
+    """Die eigentliche Ursache aus yt-dlp-stderr herausziehen.
+
+    yt-dlp schreibt Warnungen (Version, Player-Clients) an den ANFANG und den
+    tatsaechlichen Fehler ans ENDE. Ein simples stderr[:200] liefert deshalb
+    zuverlaessig nur die Warnung — und eine Fehlermeldung, die die Ursache
+    nicht enthaelt, ist schlimmer als keine, weil sie die Suche in die falsche
+    Richtung schickt.
+    """
+    lines = [l.rstrip() for l in (stderr or "").splitlines() if l.strip()]
+    if not lines:
+        return "yt-dlp ist ohne Ausgabe fehlgeschlagen"
+    errors = [l for l in lines if l.lstrip().upper().startswith("ERROR")]
+    chosen = errors if errors else lines[-8:]
+    return "\n".join(chosen)[:limit]
+
+
 @app.post("/mp4-to-mp3")
 async def mp4_to_mp3(
     request: Request,
@@ -188,8 +205,24 @@ async def youtube_transcript(
     video_id = match.group(1)
 
     try:
-        # Verfuegbare Transkripte auflisten
-        transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)
+        # Verfuegbare Transkripte auflisten.
+        #
+        # youtube-transcript-api hat in 1.0 den Einstiegspunkt umgestellt: die statische
+        # Methode list_transcripts() gibt es nicht mehr, stattdessen die Instanzmethoden
+        # list()/fetch(). Da die Abhaengigkeit in requirements.txt UNGEBUNDEN stand, hat ein
+        # beliebiger Rebuild 1.x gezogen und diesen Endpunkt lautlos zerlegt: HTTP 200 mit
+        # success:false und "type object 'YouTubeTranscriptApi' has no attribute
+        # 'list_transcripts'". Am 2026-08-16 im Betrieb gemessen — 20 von 20 Videos ohne
+        # Transkript, der Aufrufer wich still auf Web-Recherche aus.
+        #
+        # Beide Wege unterstuetzen, damit weder ein aelteres noch ein neueres Image bricht.
+        # Alles UNTERHALB dieser Zeile ist unveraendert geblieben (find_manually_created_
+        # transcript, find_generated_transcript, Iteration, is_generated) — nachgeprueft
+        # gegen 1.2.4.
+        if hasattr(YouTubeTranscriptApi, "list_transcripts"):
+            transcript_list = YouTubeTranscriptApi.list_transcripts(video_id)   # < 1.0
+        else:
+            transcript_list = YouTubeTranscriptApi().list(video_id)             # >= 1.0
 
         transcript = None
         used_language = None
@@ -259,6 +292,25 @@ async def youtube_transcript(
             "message": "Video nicht verfuegbar (privat, geloescht oder regional gesperrt)",
         }
     except Exception as e:
+        # IP-Sperre ausdruecklich benennen. Sie ist in 1.x eine eigene Ausnahme
+        # (RequestBlocked/IpBlocked), die es in aelteren Fassungen nicht gab — deshalb
+        # ueber den Klassennamen erkannt statt ueber einen Import, der auf alten Images
+        # scheitern wuerde.
+        # Warum das wichtig ist: ohne diese Unterscheidung sieht "YouTube sperrt unsere
+        # IP" in der Antwort genauso aus wie "dieses Video hat keine Untertitel". Der
+        # erste Fall betrifft ALLE Videos und verlangt Cookies oder einen Proxy, der
+        # zweite nur eines und ist normal. Am 2026-08-16 aus einem Rechenzentrums-Netz
+        # reproduziert.
+        if type(e).__name__ in ("RequestBlocked", "IpBlocked"):
+            return {
+                "success": False,
+                "has_transcript": False,
+                "blocked": True,
+                "video_id": video_id,
+                "message": "YouTube blockiert Anfragen von der IP dieses Clusters "
+                           "(kein Untertitel-Problem). Abhilfe: Cookies hinterlegen oder "
+                           "ueber einen Proxy/anderes Netz gehen.",
+            }
         return {
             "success": False,
             "has_transcript": False,
@@ -325,9 +377,15 @@ async def youtube_to_mp3(
         )
 
         if result.returncode != 0:
-            await redis.set(f"job:{job_id}:status", "failed")
-            await redis.set(f"job:{job_id}:error", result.stderr[:500])
-            return {"job_id": job_id, "status": "failed", "error": result.stderr[:200]}
+            # stderr NICHT von vorne abschneiden: yt-dlp stellt seiner Ausgabe eine
+            # mehrzeilige Versionswarnung voran ("Your yt-dlp version ... is older than
+            # 90 days"). Mit [:200] bestand die gespeicherte Fehlermeldung ausschliesslich
+            # aus dieser Warnung — die eigentliche Ursache war NIE sichtbar.
+            # Am 2026-08-16 beim Debuggen genau darauf gestossen: ein fehlgeschlagener Job
+            # lieferte drei Zeilen Warnung und sonst nichts.
+            detail = _yt_error_detail(result.stderr)
+            await redis.set(f"job:{job_id}:error", detail)
+            return {"job_id": job_id, "status": "failed", "error": detail}
 
         # yt-dlp schreibt die Datei mit --extract-audio --audio-format mp3
         # Dateiname finden
@@ -364,7 +422,7 @@ async def youtube_to_mp3(
         return {"job_id": job_id, "status": "failed"}
     except Exception as e:
         await redis.set(f"job:{job_id}:status", "failed")
-        await redis.set(f"job:{job_id}:error", str(e)[:500])
+        await redis.set(f"job:{job_id}:error", str(e)[:1500])
         return {"job_id": job_id, "status": "failed"}
     finally:
         # Cookie-Datei aufräumen

@@ -4,4 +4,8 @@ python-multipart
 arq
 redis
 yt-dlp
-youtube-transcript-api
+# Ab 1.0 ist der Einstiegspunkt instanzbasiert (list()/fetch() statt der statischen
+# list_transcripts()). Die Abhaengigkeit stand hier ungebunden — ein Rebuild zog 1.x
+# und legte /youtube-transcript still lahm. Gebunden auf die geprueft funktionierende
+# Serie; app.py kommt mit beiden Schnittstellen zurecht.
+youtube-transcript-api>=1.2,<2.0
